@@ -4,8 +4,9 @@ import pysam
 import pod5
 import numpy as np
 import argparse
+import atexit
 from tqdm import tqdm
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed, wait, FIRST_COMPLETED
 import time
 
 # --- [配置参数] ---
@@ -25,7 +26,19 @@ PAD_VAL = 0  # 对应 BASE_TO_INT 中的 N/Blank
 
 # --- 全局变量 (用于多进程继承) ---
 global_fasta_handle = None
-global_pod5_lookup = None 
+global_pod5_lookup = None
+global_pod5_reader_cache = {}
+
+
+def _close_cached_pod5_readers():
+    for reader in global_pod5_reader_cache.values():
+        try:
+            reader.close()
+        except Exception:
+            pass
+
+
+atexit.register(_close_cached_pod5_readers)
 
 def worker_init(fasta_path):
     """初始化工作进程的 FASTA 句柄"""
@@ -50,8 +63,9 @@ def process_task(task_data):
     }
     samples_list = [] 
 
-    global global_fasta_handle 
+    global global_fasta_handle
     global global_pod5_lookup
+    global global_pod5_reader_cache
     
     try:
         if read_id_str not in global_pod5_lookup:
@@ -103,81 +117,93 @@ def process_task(task_data):
         # 🚀 ==========================================================
 
         # 3. 打开 POD5 读取信号
-        with pod5.Reader(pod5_path) as reader:
-            batch = reader.get_batch(batch_idx)
-            pod5_read = batch.get_read(row_idx)
-            
-            if pod5_read is None:
-                worker_stats["read_not_found_in_pod5_file"] += 1
-                return samples_list, worker_stats
-            
-            raw_signal = pod5_read.signal
+        reader = global_pod5_reader_cache.get(pod5_path)
+        if reader is None:
+            reader = pod5.Reader(pod5_path)
+            global_pod5_reader_cache[pod5_path] = reader
 
-            if len(raw_signal) < SIGNAL_LENGTH:
-                worker_stats["signal_too_short"] += 1
-                return samples_list, worker_stats
+        batch = reader.get_batch(batch_idx)
+        pod5_read = batch.get_read(row_idx)
 
-            # 4. 滑动窗口处理
-            # 这里的逻辑是：我们在 raw_signal 上滑动，切出一段信号
-            # 然后查看 base_signal_starts_absolute 中有哪些点落在这个窗口内
+        if pod5_read is None:
+            worker_stats["read_not_found_in_pod5_file"] += 1
+            return samples_list, worker_stats
+
+        raw_signal = pod5_read.signal
+
+        if len(raw_signal) < SIGNAL_LENGTH:
+            worker_stats["signal_too_short"] += 1
+            return samples_list, worker_stats
+
+        # 4. 滑动窗口处理
+        # 这里的逻辑是：我们在 raw_signal 上滑动，切出一段信号
+        # 然后查看 base_signal_starts_absolute 中有哪些点落在这个窗口内
             
-            for win_start in range(0, len(raw_signal) - SIGNAL_LENGTH, WINDOW_STRIDE):
-                worker_stats["total_windows_processed"] += 1
-                win_end = win_start + SIGNAL_LENGTH
-                
-                signal_window = raw_signal[win_start:win_end]
-                
-                # 归一化
-                median = np.median(signal_window)
-                mad = np.median(np.abs(signal_window - median))
-                
-                if mad == 0:
-                    worker_stats["window_mad_is_zero"] += 1
-                    continue
-                    
-                normalized_signal = (signal_window - median) / mad
-                
-                # 5. 标签对齐 (Label Alignment)
-                # 查找当前窗口范围 [win_start, win_end] 内包含了哪些碱基
-                # searchsorted 返回的是索引
-                first_base_idx = np.searchsorted(base_signal_starts_absolute, win_start, side='right') 
-                last_base_idx = np.searchsorted(base_signal_starts_absolute, win_end, side='left')
-                
-                if first_base_idx >= last_base_idx:
-                    worker_stats["window_no_bases"] += 1
-                    continue
-                
-                # 切片获取对应的碱基序列
-                # 注意：如果 ref_seq 长度与 mv 推导出的 bases 数量不一致，这里可能会越界，加个保护
-                current_ref_len = len(ground_truth_label_str)
-                safe_last = min(last_base_idx, current_ref_len)
-                
-                if first_base_idx >= safe_last:
-                    continue
+        total_bases = len(base_signal_starts_absolute)
+        left_idx = 0
+        right_idx = 0
 
-                label_str_window = ground_truth_label_str[first_base_idx:safe_last]
-                
-                # 转换字符到整数
-                label_int_window = [BASE_TO_INT[b] for b in label_str_window if b in BASE_TO_INT]
-                
-                if not label_int_window:
-                    worker_stats["dbg_label_is_empty"] += 1
-                    worker_stats["window_label_invalid"] += 1
-                    continue
-                
-                if len(label_int_window) > MAX_LABEL_LEN: 
-                    worker_stats["dbg_label_is_too_long"] += 1
-                    worker_stats["window_label_invalid"] += 1
-                    continue
-                
-                # 6. Padding (使用 0 填充)
-                padded_label = np.full((MAX_LABEL_LEN,), PAD_VAL, dtype=np.int32) 
-                padded_label[:len(label_int_window)] = label_int_window
-                
-                normalized_signal = normalized_signal.reshape(1, SIGNAL_LENGTH)
-                
-                samples_list.append((normalized_signal, padded_label, len(label_int_window)))
-                worker_stats["valid_samples_created"] += 1
+        for win_start in range(0, len(raw_signal) - SIGNAL_LENGTH, WINDOW_STRIDE):
+            worker_stats["total_windows_processed"] += 1
+            win_end = win_start + SIGNAL_LENGTH
+
+            signal_window = raw_signal[win_start:win_end]
+
+            # 归一化
+            median = np.median(signal_window)
+            mad = np.median(np.abs(signal_window - median))
+
+            if mad == 0:
+                worker_stats["window_mad_is_zero"] += 1
+                continue
+
+            normalized_signal = (signal_window - median) / mad
+
+            # 5. 标签对齐 (Label Alignment)
+            # 增量移动指针，避免对 searchsorted 的重复调用
+            while left_idx < total_bases and base_signal_starts_absolute[left_idx] <= win_start:
+                left_idx += 1
+            while right_idx < total_bases and base_signal_starts_absolute[right_idx] < win_end:
+                right_idx += 1
+
+            first_base_idx = left_idx
+            last_base_idx = right_idx
+
+            if first_base_idx >= last_base_idx:
+                worker_stats["window_no_bases"] += 1
+                continue
+
+            # 切片获取对应的碱基序列
+            # 注意：如果 ref_seq 长度与 mv 推导出的 bases 数量不一致，这里可能会越界，加个保护
+            current_ref_len = len(ground_truth_label_str)
+            safe_last = min(last_base_idx, current_ref_len)
+
+            if first_base_idx >= safe_last:
+                continue
+
+            label_str_window = ground_truth_label_str[first_base_idx:safe_last]
+
+            # 转换字符到整数
+            label_int_window = [BASE_TO_INT[b] for b in label_str_window if b in BASE_TO_INT]
+
+            if not label_int_window:
+                worker_stats["dbg_label_is_empty"] += 1
+                worker_stats["window_label_invalid"] += 1
+                continue
+
+            if len(label_int_window) > MAX_LABEL_LEN:
+                worker_stats["dbg_label_is_too_long"] += 1
+                worker_stats["window_label_invalid"] += 1
+                continue
+
+            # 6. Padding (使用 0 填充)
+            padded_label = np.full((MAX_LABEL_LEN,), PAD_VAL, dtype=np.int32)
+            padded_label[:len(label_int_window)] = label_int_window
+
+            normalized_signal = normalized_signal.reshape(1, SIGNAL_LENGTH)
+
+            samples_list.append((normalized_signal, padded_label, len(label_int_window)))
+            worker_stats["valid_samples_created"] += 1
 
     except KeyError:
         worker_stats["missing_tags"] += 1
@@ -216,8 +242,29 @@ def write_chunk_to_hdf5(datasets, chunk):
     label_len_ds[current_size:new_size] = lengths
 
 
+def consume_completed_futures(completed_futures, futures_set, total_stats, results_chunk, hdf5_datasets):
+    if not completed_futures:
+        return results_chunk
+
+    for future in completed_futures:
+        futures_set.remove(future)
+        samples_list, worker_stats = future.result()
+
+        for key, value in worker_stats.items():
+            total_stats[key] += value
+
+        if samples_list:
+            results_chunk.extend(samples_list)
+
+    if len(results_chunk) >= HDF5_WRITE_CHUNK_SIZE:
+        write_chunk_to_hdf5(hdf5_datasets, results_chunk)
+        return []
+
+    return results_chunk
+
+
 def main(args):
-    global global_pod5_lookup 
+    global global_pod5_lookup
     
     total_stats = {
         "bam_reads_processed": 0, "id_not_in_pod5_index": 0, "read_not_found_in_pod5_file": 0,
@@ -272,8 +319,8 @@ def main(args):
             initializer=worker_init,
             initargs=(args.reference_fasta,)
         ) as executor:
-            
-            futures = [] 
+
+            futures = set()
             print("Step 3 & 4: Submitting tasks and consuming results...")
             
             # 迭代 BAM 文件
@@ -296,7 +343,7 @@ def main(args):
                     )
                     
                     # 移除了 stride 参数，因为现在从 mv[0] 自动获取
-                    futures.append(executor.submit(process_task, task_data))
+                    futures.add(executor.submit(process_task, task_data))
                     total_stats["tasks_submitted"] += 1
                     
                 except Exception as e:
@@ -305,31 +352,34 @@ def main(args):
                 
                 # 消费者逻辑
                 while len(futures) >= MAX_QUEUE_SIZE:
-                    # 获取一个已完成的任务 (如有) 或者等待第一个完成
-                    done_futures = [f for f in futures if f.done()]
+                    done_futures, _ = wait(futures, timeout=0, return_when=FIRST_COMPLETED)
                     if not done_futures:
-                        # 如果没有完成的，等待任意一个完成
-                        import concurrent.futures
-                        done_futures, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
-                    
-                    for future in done_futures:
-                        futures.remove(future)
-                        samples_list, worker_stats = future.result()
-                        
-                        for key, value in worker_stats.items():
-                            total_stats[key] += value
-                        
-                        if samples_list:
-                            results_chunk.extend(samples_list)
-                    
-                    # 写入 HDF5
-                    if len(results_chunk) >= HDF5_WRITE_CHUNK_SIZE:
-                        write_chunk_to_hdf5(hdf5_datasets, results_chunk)
-                        results_chunk = [] 
+                        done_futures, _ = wait(futures, return_when=FIRST_COMPLETED)
+
+                    results_chunk = consume_completed_futures(
+                        done_futures,
+                        futures,
+                        total_stats,
+                        results_chunk,
+                        hdf5_datasets,
+                    )
+
+                # 抢先消费已经完成的任务，避免在主循环末尾堆积
+                if futures:
+                    done_futures, _ = wait(futures, timeout=0, return_when=FIRST_COMPLETED)
+                    results_chunk = consume_completed_futures(
+                        done_futures,
+                        futures,
+                        total_stats,
+                        results_chunk,
+                        hdf5_datasets,
+                    )
 
             # Step 5: 处理剩余任务
             print("Step 5: Consuming remaining tasks...")
-            for future in tqdm(as_completed(futures), total=len(futures)):
+            remaining_futures = list(futures)
+            futures.clear()
+            for future in tqdm(as_completed(remaining_futures), total=len(remaining_futures)):
                 samples_list, worker_stats = future.result()
                 for key, value in worker_stats.items():
                     total_stats[key] += value
