@@ -1,0 +1,111 @@
+# -----------------------------
+# Python cache / bytecode
+# -----------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# -----------------------------
+# Virtual environments
+# -----------------------------
+venv/
+.env/
+.venv/
+*.egg-info/
+*.egg
+
+# -----------------------------
+# Log files
+# -----------------------------
+*.log
+*.out
+*.err
+logs/
+log/
+tmp/
+temp/
+
+# -----------------------------
+# Jupyter Notebook
+# -----------------------------
+.ipynb_checkpoints/
+*.ipynb_convert/
+
+# -----------------------------
+# Deep Learning / ML Outputs
+# -----------------------------
+runs/                 # tensorboard logs
+checkpoints/
+ckpt/
+*.ckpt
+*.pth
+*.pt
+*.onnx
+
+# -----------------------------
+# Data files (DO NOT TRACK)
+# -----------------------------
+*.npy
+*.npz
+*.csv
+*.tsv
+*.xlsx
+*.xls
+*.hdf5
+*.h5
+*.pkl
+*.pickle
+
+# -----------------------------
+# Nanopore / Bioinformatics Data
+# -----------------------------
+*.pod5
+*.fast5
+*.f5
+*.bam
+*.sam
+*.bai
+*.fasta
+*.fa
+*.fastq
+*.fq
+*.gz
+*.bz2
+
+# -----------------------------
+# Large experiment raw data folders
+# -----------------------------
+data/
+dataset/
+raw/
+results/
+output/
+outputs/
+
+# -----------------------------
+# C/C++ build files
+# -----------------------------
+build/
+build*/
+cmake-build*/
+*.o
+*.so
+*.a
+*.exe
+*.dll
+
+# -----------------------------
+# VSCode / IDE
+# -----------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# -----------------------------
+# System files
+# -----------------------------
+.DS_Store
+Thumbs.db
+
