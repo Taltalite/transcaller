@@ -6,7 +6,7 @@
 
 /home/lijy/workspace/dorado-1.2.0-linux-x64/bin/dorado basecaller hac \
  --reference  /data/biolab-nvme-pool1/fanqy/sequencing/git/deepsme_data/hg38/hg38.fa \
- --emit-moves /home/lijy/windows_ssd/HG002/pod5_pass_5/merged/ > /home/lijy/windows_ssd/HG002/HG002_basecall_m5.bam
+ --emit-moves /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10/ > /data/biolab-nvme-pcie2/lijy/HG002/HG002_dorado_10.bam
 
 samtools sort -@ 1 /home/lijy/windows_ssd/HG002/HG002_basecall_1.bam -o /home/lijy/windows_ssd/HG002/HG002_basecall_1.sorted.bam
 
@@ -92,3 +92,9 @@ bonito basecaller \
 # > duration: 0:41:30
 # > samples per second 4.0E+06
 # > done
+
+
+python create_dataset_mp.py --bam_file /data/biolab-nvme-pcie2/lijy/HG002/HG002_dorado_10.sorted.bam \
+ --pod5_dir /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10/ \
+ --reference_fasta /home/lijy/windows_ssd/HG002/hg38.fa \
+ --output_hdf5 /data/biolab-nvme-pcie2/lijy/HG002/dataset/HG002_dorado_10.h5 --workers 8

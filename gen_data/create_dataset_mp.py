@@ -15,16 +15,15 @@ WINDOW_STRIDE = 1024
 HDF5_WRITE_CHUNK_SIZE = 1024 
 MAX_LABEL_LEN = 200
 
-# --- [关键修改 1: 碱基映射更新] ---
-# N 和 n 映射为 0，通常作为 Padding 或 Blank
+# --- [碱基映射] ---
 BASE_TO_INT = {
     'A': 1, 'C': 2, 'G': 3, 'T': 4,
     'a': 1, 'c': 2, 'g': 3, 't': 4,
     'N': 0, 'n': 0
 }
-PAD_VAL = 0  # 对应 BASE_TO_INT 中的 N/Blank
+PAD_VAL = 0 
 
-# --- 全局变量 (用于多进程继承) ---
+# --- 全局变量 ---
 global_fasta_handle = None
 global_pod5_lookup = None
 global_pod5_reader_cache = {}
@@ -37,7 +36,6 @@ def _close_cached_pod5_readers():
         except Exception:
             pass
 
-
 atexit.register(_close_cached_pod5_readers)
 
 def worker_init(fasta_path):
@@ -48,9 +46,7 @@ def worker_init(fasta_path):
 def process_task(task_data):
     """
     处理单个 Read 的核心函数。
-    修正了 Stride 解析和 TS 起始点对齐逻辑。
     """
-    # 1. 解包任务数据 (注意：ts_tag 对应 template_start_offset)
     read_id_str, ref_name, ref_start, ref_end, ts_tag, mv_tag = task_data
     
     worker_stats = {
@@ -74,49 +70,25 @@ def process_task(task_data):
 
         pod5_path, batch_idx, row_idx = global_pod5_lookup[read_id_str]
         
-        # 2. 获取参考序列
-        # 注意：BAM 中的序列可能包含 soft clipping，这里最好直接用 BAM query sequence 
-        # 如果你坚持用 FASTA 参考序列，请确保 ref_start/end 与信号是完全对齐的。
-        # **修正建议**：训练 basecaller 通常使用 BAM 中的 query_sequence (因为它是实际测到的序列)，
-        # 但既然你传了 ref 坐标，这里保留你原本的逻辑读取 FASTA。
         ground_truth_label_str = global_fasta_handle.fetch(ref_name, ref_start, ref_end).upper()
 
-        # 🚀 ==========================================================
-        # 🚀 [关键修改 2 & 3]：Move Table 解析与坐标计算
-        # ==========================================================
-        
         # A. 解析 MV 标签
         raw_mv = np.array(mv_tag, dtype=np.int64)
-        
-        # 自动获取 Stride (根据你的发现，mv[0] 是 6)
         stride = raw_mv[0] 
-        
-        # 获取实际的 moves (0/1 序列)
         moves = raw_mv[1:]
         
-        # B. 找到所有发生碱基转换的时间步 (Frame Indices)
-        # np.flatnonzero(moves) 返回的是 moves 数组中值为 1 的索引位置
-        # 例如: moves=[1, 0, 1] -> indices=[0, 2]
+        # B. 找到转换时间步
         base_frame_indices = np.flatnonzero(moves)
         
-        # C. 结合 TS 标签计算绝对采样点坐标
-        # ts_tag: Read 在原始信号中的绝对起始点
-        # 公式: 绝对坐标 = TS + (Frame_Index * Stride)
+        # C. 计算绝对坐标
         if ts_tag is None:
-            # 如果没有 ts 标签，回退到 0 (但在你的数据中应该都有)
             ts_offset = 0
         else:
             ts_offset = ts_tag
 
         base_signal_starts_absolute = ts_offset + (base_frame_indices * stride)
 
-        # 完整性检查：确保计算出的碱基数量与序列长度大致匹配
-        # len(base_signal_starts_absolute) 应该等于 (或非常接近) len(ground_truth_label_str)
-        # 如果你是从 FASTA 获取的序列，可能会有 Indel 导致的长度差异，这里不做强行 Assert，但请留意。
-
-        # 🚀 ==========================================================
-
-        # 3. 打开 POD5 读取信号
+        # 3. 打开 POD5
         reader = global_pod5_reader_cache.get(pod5_path)
         if reader is None:
             reader = pod5.Reader(pod5_path)
@@ -135,10 +107,7 @@ def process_task(task_data):
             worker_stats["signal_too_short"] += 1
             return samples_list, worker_stats
 
-        # 4. 滑动窗口处理
-        # 这里的逻辑是：我们在 raw_signal 上滑动，切出一段信号
-        # 然后查看 base_signal_starts_absolute 中有哪些点落在这个窗口内
-            
+        # 4. 滑动窗口
         total_bases = len(base_signal_starts_absolute)
         left_idx = 0
         right_idx = 0
@@ -149,7 +118,6 @@ def process_task(task_data):
 
             signal_window = raw_signal[win_start:win_end]
 
-            # 归一化
             median = np.median(signal_window)
             mad = np.median(np.abs(signal_window - median))
 
@@ -159,8 +127,7 @@ def process_task(task_data):
 
             normalized_signal = (signal_window - median) / mad
 
-            # 5. 标签对齐 (Label Alignment)
-            # 增量移动指针，避免对 searchsorted 的重复调用
+            # 5. 标签对齐
             while left_idx < total_bases and base_signal_starts_absolute[left_idx] <= win_start:
                 left_idx += 1
             while right_idx < total_bases and base_signal_starts_absolute[right_idx] < win_end:
@@ -173,8 +140,6 @@ def process_task(task_data):
                 worker_stats["window_no_bases"] += 1
                 continue
 
-            # 切片获取对应的碱基序列
-            # 注意：如果 ref_seq 长度与 mv 推导出的 bases 数量不一致，这里可能会越界，加个保护
             current_ref_len = len(ground_truth_label_str)
             safe_last = min(last_base_idx, current_ref_len)
 
@@ -182,8 +147,6 @@ def process_task(task_data):
                 continue
 
             label_str_window = ground_truth_label_str[first_base_idx:safe_last]
-
-            # 转换字符到整数
             label_int_window = [BASE_TO_INT[b] for b in label_str_window if b in BASE_TO_INT]
 
             if not label_int_window:
@@ -196,7 +159,6 @@ def process_task(task_data):
                 worker_stats["window_label_invalid"] += 1
                 continue
 
-            # 6. Padding (使用 0 填充)
             padded_label = np.full((MAX_LABEL_LEN,), PAD_VAL, dtype=np.int32)
             padded_label[:len(label_int_window)] = label_int_window
 
@@ -208,8 +170,6 @@ def process_task(task_data):
     except KeyError:
         worker_stats["missing_tags"] += 1
     except Exception as e:
-        # 捕获其他潜在错误防止进程崩溃
-        # print(f"Error processing {read_id_str}: {e}") 
         pass
     
     return samples_list, worker_stats
@@ -226,7 +186,6 @@ def write_chunk_to_hdf5(datasets, chunk):
     label_ds.resize(new_size, axis=0)
     label_len_ds.resize(new_size, axis=0)
     
-    # 预分配 numpy 数组以加速写入
     chunk_len = len(chunk)
     signals = np.zeros((chunk_len, 1, SIGNAL_LENGTH), dtype=np.float32)
     labels = np.zeros((chunk_len, MAX_LABEL_LEN), dtype=np.int32)
@@ -295,12 +254,37 @@ def main(args):
 
     print("Step 2: Setting up HDF5 file and process pool...")
     bam_file = pysam.AlignmentFile(args.bam_file, "rb")
-    # 有些 BAM 没有 mapped 属性，或者非常大，用 try-except 更稳健
-    try:
-        bam_file_size = bam_file.mapped if bam_file.mapped > 0 else 100000
-    except:
-        bam_file_size = 100000 # Dummy value for tqdm
     
+    # --- [关键修改：高效获取 BAM 总数] ---
+    bam_file_size = 0
+    try:
+        # 使用 pysam.idxstats 直接解析索引文件 (等同于 samtools idxstats)
+        # 它返回一个字符串，格式为：ref_name \t seq_len \t mapped \t unmapped \n
+        idx_stats_str = pysam.idxstats(args.bam_file)
+        
+        if idx_stats_str:
+            for line in idx_stats_str.splitlines():
+                parts = line.split('\t')
+                if len(parts) >= 4:
+                    # 第3列是 mapped, 第4列是 unmapped
+                    mapped_count = int(parts[2])
+                    unmapped_count = int(parts[3])
+                    bam_file_size += (mapped_count + unmapped_count)
+            
+            print(f"Total reads estimated from BAM index (pysam.idxstats): {bam_file_size}")
+        else:
+            raise ValueError("pysam.idxstats returned empty result")
+
+    except Exception as e:
+        # 如果上面的方法依然失败，回退到读取文件头 (可能不准确)
+        print(f"Warning: Could not determine total reads via idxstats ({e}).")
+        if bam_file.mapped > 0:
+            bam_file_size = bam_file.mapped + bam_file.unmapped
+            print(f"Fallback: Total reads from BAM header/mapped prop: {bam_file_size}")
+        else:
+             print("Fallback: Progress bar will not show ETA (total unknown).")
+             bam_file_size = None
+
     max_workers = args.workers
     MAX_QUEUE_SIZE = max_workers * 10
     
@@ -323,12 +307,21 @@ def main(args):
             futures = set()
             print("Step 3 & 4: Submitting tasks and consuming results...")
             
-            # 迭代 BAM 文件
-            for read in tqdm(bam_file, desc="Processing Reads"):
+            # --- [关键修改：tqdm 加入 total 参数] ---
+            # 因为你的消费者逻辑会阻塞生产者 (MAX_QUEUE_SIZE)，所以这个进度条的速率准确反映了整体处理速度
+            bam_iterator = tqdm(
+                bam_file, 
+                total=bam_file_size, 
+                desc="Processing Reads", 
+                unit="read",
+                dynamic_ncols=True, # 自动调整宽度
+                smoothing=0.05      # 降低抖动
+            )
+            
+            for read in bam_iterator:
                 total_stats["bam_reads_processed"] += 1
                 
                 try:
-                    # 检查是否有必要的标签
                     if not read.has_tag('mv') or not read.has_tag('ts'):
                         total_stats["missing_tags"] += 1
                         continue
@@ -338,22 +331,22 @@ def main(args):
                         read.reference_name,
                         read.reference_start,
                         read.reference_end,
-                        read.get_tag('ts'), # 传递 TS 标签
-                        read.get_tag('mv')  # 传递 MV 标签
+                        read.get_tag('ts'),
+                        read.get_tag('mv')
                     )
                     
-                    # 移除了 stride 参数，因为现在从 mv[0] 自动获取
                     futures.add(executor.submit(process_task, task_data))
                     total_stats["tasks_submitted"] += 1
                     
                 except Exception as e:
-                    # print(f"Skipping read due to error: {e}")
                     continue
                 
-                # 消费者逻辑
+                # 消费者逻辑 (Consumer Logic)
+                # 当队列满时，主进程在此处等待，这使得 tqdm 的速度与 Workers 处理速度同步
                 while len(futures) >= MAX_QUEUE_SIZE:
                     done_futures, _ = wait(futures, timeout=0, return_when=FIRST_COMPLETED)
                     if not done_futures:
+                        # 如果没有立刻完成的，稍微阻塞一下等待至少一个完成
                         done_futures, _ = wait(futures, return_when=FIRST_COMPLETED)
 
                     results_chunk = consume_completed_futures(
@@ -364,7 +357,7 @@ def main(args):
                         hdf5_datasets,
                     )
 
-                # 抢先消费已经完成的任务，避免在主循环末尾堆积
+                # 抢先消费 (Optional, 保持流转顺畅)
                 if futures:
                     done_futures, _ = wait(futures, timeout=0, return_when=FIRST_COMPLETED)
                     results_chunk = consume_completed_futures(
@@ -379,7 +372,7 @@ def main(args):
             print("Step 5: Consuming remaining tasks...")
             remaining_futures = list(futures)
             futures.clear()
-            for future in tqdm(as_completed(remaining_futures), total=len(remaining_futures)):
+            for future in tqdm(as_completed(remaining_futures), total=len(remaining_futures), desc="Finishing pending"):
                 samples_list, worker_stats = future.result()
                 for key, value in worker_stats.items():
                     total_stats[key] += value
@@ -410,7 +403,6 @@ if __name__ == "__main__":
     parser.add_argument("--reference_fasta", type=str, required=True)
     parser.add_argument("--output_hdf5", type=str, required=True)
     parser.add_argument("--workers", type=int, default=8)
-    # 移除了 basecaller-stride 参数，因为代码现在会自动识别
     args = parser.parse_args()
     
     main(args)
