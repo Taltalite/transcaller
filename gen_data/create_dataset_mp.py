@@ -1,408 +1,421 @@
-import os
-import h5py
-import pysam
-import pod5
-import numpy as np
+#!/usr/bin/env python
+"""Dataset generation pipeline for Dorado + Transcaller.
+
+This script consumes a BAM file that contains Dorado basecalls produced with
+``--emit-moves`` and produces a NumPy dataset (chunked ``.npy`` files).  Each
+sample contains a normalized 2048-sample current window and the aligned base
+labels that overlap that window.
+
+Compared to the previous implementation, this version:
+* uses ``AlignedSegment.get_aligned_pairs`` to derive the reference base for
+  each base in the read, so insertions/deletions are handled correctly;
+* keeps the labels in read orientation (reverse-complementing when needed);
+* stores the output as NumPy chunks instead of HDF5.
+"""
+
+from __future__ import annotations
+
 import argparse
-import atexit
-from tqdm import tqdm
-from concurrent.futures import ProcessPoolExecutor, as_completed, wait, FIRST_COMPLETED
+import json
+import os
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed, wait, FIRST_COMPLETED
+from dataclasses import dataclass
+from typing import Dict, List, Sequence, Tuple
 
-# --- [配置参数] ---
-SIGNAL_LENGTH = 2048 
+import numpy as np
+import pod5
+import pysam
+from tqdm import tqdm
+
+# --------------------------------------------------------------------------------------
+# Configuration defaults (can be overridden via CLI)
+# --------------------------------------------------------------------------------------
+SIGNAL_LENGTH = 2048
 WINDOW_STRIDE = 1024
-HDF5_WRITE_CHUNK_SIZE = 1024 
 MAX_LABEL_LEN = 200
+CHUNK_SIZE = 2048
 
-# --- [碱基映射] ---
-BASE_TO_INT = {
-    'A': 1, 'C': 2, 'G': 3, 'T': 4,
-    'a': 1, 'c': 2, 'g': 3, 't': 4,
-    'N': 0, 'n': 0
-}
-PAD_VAL = 0 
+BASE_TO_INT = {"A": 1, "C": 2, "G": 3, "T": 4}
+PAD_VAL = 0
+COMPLEMENT = str.maketrans("ACGT", "TGCA")
 
-# --- 全局变量 ---
+
+def complement_base(base: str, is_reverse: bool) -> str:
+    base = base.upper()
+    if not is_reverse:
+        return base
+    return base.translate(COMPLEMENT)
+
+
+@dataclass
+class TaskData:
+    read_id: str
+    read_length: int
+    reference_name: str
+    is_reverse: bool
+    ts_tag: int
+    mv_tag: Sequence[int]
+    read_to_ref_pairs: List[Tuple[int, int]]
+
+
+@dataclass
+class Sample:
+    signal: np.ndarray
+    label: np.ndarray
+    label_len: int
+
+
+# --------------------------------------------------------------------------------------
+# Worker state
+# --------------------------------------------------------------------------------------
 global_fasta_handle = None
-global_pod5_lookup = None
-global_pod5_reader_cache = {}
+pod5_lookup: Dict[str, Tuple[str, int, int]] = {}
+pod5_reader_cache: Dict[str, pod5.Reader] = {}
 
 
-def _close_cached_pod5_readers():
-    for reader in global_pod5_reader_cache.values():
-        try:
-            reader.close()
-        except Exception:
-            pass
-
-atexit.register(_close_cached_pod5_readers)
-
-def worker_init(fasta_path):
-    """初始化工作进程的 FASTA 句柄"""
+def worker_init(fasta_path: str, lookup: Dict[str, Tuple[str, int, int]]):
     global global_fasta_handle
+    global pod5_lookup
     global_fasta_handle = pysam.FastaFile(fasta_path)
+    pod5_lookup = lookup
 
-def process_task(task_data):
-    """
-    处理单个 Read 的核心函数。
-    """
-    read_id_str, ref_name, ref_start, ref_end, ts_tag, mv_tag = task_data
-    
-    worker_stats = {
-        "id_not_in_pod5_index": 0, "read_not_found_in_pod5_file": 0,
-        "missing_tags": 0, "signal_too_short": 0, "total_windows_processed": 0,
-        "window_mad_is_zero": 0, "window_no_bases": 0, "window_label_invalid": 0,
-        "dbg_label_is_empty": 0,
-        "dbg_label_is_too_long": 0,
-        "valid_samples_created": 0,
+
+# --------------------------------------------------------------------------------------
+# Core per-read processing
+# --------------------------------------------------------------------------------------
+
+def fetch_signal(read_id: str) -> Tuple[np.ndarray, pod5.Read]:
+    if read_id not in pod5_lookup:
+        raise KeyError("Read ID missing in POD5 index")
+
+    pod5_path, batch_idx, row_idx = pod5_lookup[read_id]
+
+    reader = pod5_reader_cache.get(pod5_path)
+    if reader is None:
+        reader = pod5.Reader(pod5_path)
+        pod5_reader_cache[pod5_path] = reader
+
+    batch = reader.get_batch(batch_idx)
+    pod5_read = batch.get_read(row_idx)
+    if pod5_read is None:
+        raise KeyError("Read not found in POD5 file")
+
+    return pod5_read.signal.astype(np.float32), pod5_read
+
+
+def build_label_lookup(
+    read_to_ref_pairs: Sequence[Tuple[int, int]],
+    reference_name: str,
+    is_reverse: bool,
+) -> Dict[int, int]:
+    label_lookup: Dict[int, int] = {}
+    for read_pos, ref_pos in read_to_ref_pairs:
+        base = global_fasta_handle.fetch(reference_name, ref_pos, ref_pos + 1)
+        if not base:
+            continue
+        base = complement_base(base, is_reverse)
+        label_int = BASE_TO_INT.get(base)
+        if label_int is None:
+            continue
+        label_lookup[read_pos] = label_int
+    return label_lookup
+
+
+def normalize_signal(signal_window: np.ndarray) -> np.ndarray:
+    median = np.median(signal_window)
+    mad = np.median(np.abs(signal_window - median))
+    if mad == 0:
+        raise ValueError("MAD is zero")
+    return (signal_window - median) / mad
+
+
+def process_task(task: TaskData) -> Tuple[List[Sample], Dict[str, int]]:
+    stats = {
+        "id_not_in_pod5_index": 0,
+        "read_not_found": 0,
+        "missing_mv": 0,
+        "missing_signal": 0,
+        "mv_length_mismatch": 0,
+        "signal_too_short": 0,
+        "mad_is_zero": 0,
+        "window_no_bases": 0,
+        "window_label_too_long": 0,
+        "valid_samples": 0,
     }
-    samples_list = [] 
 
-    global global_fasta_handle
-    global global_pod5_lookup
-    global global_pod5_reader_cache
-    
+    samples: List[Sample] = []
+
     try:
-        if read_id_str not in global_pod5_lookup:
-            worker_stats["id_not_in_pod5_index"] += 1
-            return samples_list, worker_stats
-
-        pod5_path, batch_idx, row_idx = global_pod5_lookup[read_id_str]
-        
-        ground_truth_label_str = global_fasta_handle.fetch(ref_name, ref_start, ref_end).upper()
-
-        # A. 解析 MV 标签
-        raw_mv = np.array(mv_tag, dtype=np.int64)
-        stride = raw_mv[0] 
-        moves = raw_mv[1:]
-        
-        # B. 找到转换时间步
-        base_frame_indices = np.flatnonzero(moves)
-        
-        # C. 计算绝对坐标
-        if ts_tag is None:
-            ts_offset = 0
-        else:
-            ts_offset = ts_tag
-
-        base_signal_starts_absolute = ts_offset + (base_frame_indices * stride)
-
-        # 3. 打开 POD5
-        reader = global_pod5_reader_cache.get(pod5_path)
-        if reader is None:
-            reader = pod5.Reader(pod5_path)
-            global_pod5_reader_cache[pod5_path] = reader
-
-        batch = reader.get_batch(batch_idx)
-        pod5_read = batch.get_read(row_idx)
-
-        if pod5_read is None:
-            worker_stats["read_not_found_in_pod5_file"] += 1
-            return samples_list, worker_stats
-
-        raw_signal = pod5_read.signal
-
-        if len(raw_signal) < SIGNAL_LENGTH:
-            worker_stats["signal_too_short"] += 1
-            return samples_list, worker_stats
-
-        # 4. 滑动窗口
-        total_bases = len(base_signal_starts_absolute)
-        left_idx = 0
-        right_idx = 0
-
-        for win_start in range(0, len(raw_signal) - SIGNAL_LENGTH, WINDOW_STRIDE):
-            worker_stats["total_windows_processed"] += 1
-            win_end = win_start + SIGNAL_LENGTH
-
-            signal_window = raw_signal[win_start:win_end]
-
-            median = np.median(signal_window)
-            mad = np.median(np.abs(signal_window - median))
-
-            if mad == 0:
-                worker_stats["window_mad_is_zero"] += 1
-                continue
-
-            normalized_signal = (signal_window - median) / mad
-
-            # 5. 标签对齐
-            while left_idx < total_bases and base_signal_starts_absolute[left_idx] <= win_start:
-                left_idx += 1
-            while right_idx < total_bases and base_signal_starts_absolute[right_idx] < win_end:
-                right_idx += 1
-
-            first_base_idx = left_idx
-            last_base_idx = right_idx
-
-            if first_base_idx >= last_base_idx:
-                worker_stats["window_no_bases"] += 1
-                continue
-
-            current_ref_len = len(ground_truth_label_str)
-            safe_last = min(last_base_idx, current_ref_len)
-
-            if first_base_idx >= safe_last:
-                continue
-
-            label_str_window = ground_truth_label_str[first_base_idx:safe_last]
-            label_int_window = [BASE_TO_INT[b] for b in label_str_window if b in BASE_TO_INT]
-
-            if not label_int_window:
-                worker_stats["dbg_label_is_empty"] += 1
-                worker_stats["window_label_invalid"] += 1
-                continue
-
-            if len(label_int_window) > MAX_LABEL_LEN:
-                worker_stats["dbg_label_is_too_long"] += 1
-                worker_stats["window_label_invalid"] += 1
-                continue
-
-            padded_label = np.full((MAX_LABEL_LEN,), PAD_VAL, dtype=np.int32)
-            padded_label[:len(label_int_window)] = label_int_window
-
-            normalized_signal = normalized_signal.reshape(1, SIGNAL_LENGTH)
-
-            samples_list.append((normalized_signal, padded_label, len(label_int_window)))
-            worker_stats["valid_samples_created"] += 1
-
+        raw_signal, _ = fetch_signal(task.read_id)
     except KeyError:
-        worker_stats["missing_tags"] += 1
-    except Exception as e:
-        pass
-    
-    return samples_list, worker_stats
+        stats["id_not_in_pod5_index"] += 1
+        return samples, stats
+
+    if raw_signal.shape[0] < SIGNAL_LENGTH:
+        stats["signal_too_short"] += 1
+        return samples, stats
+
+    mv = np.asarray(task.mv_tag, dtype=np.int64)
+    if mv.size <= 1:
+        stats["missing_mv"] += 1
+        return samples, stats
+
+    stride = mv[0]
+    moves = mv[1:]
+    base_indices = np.flatnonzero(moves)
+    if base_indices.size < task.read_length:
+        stats["mv_length_mismatch"] += 1
+        return samples, stats
+
+    base_indices = base_indices[: task.read_length]
+    ts_offset = int(task.ts_tag) if task.ts_tag is not None else 0
+    base_positions = ts_offset + (base_indices * stride)
+
+    label_lookup = build_label_lookup(
+        task.read_to_ref_pairs, task.reference_name, task.is_reverse
+    )
+
+    if not label_lookup:
+        stats["window_no_bases"] += 1
+        return samples, stats
+
+    valid_positions = []
+    valid_labels = []
+    for read_pos in range(task.read_length):
+        label = label_lookup.get(read_pos)
+        if label is None:
+            continue
+        valid_positions.append(base_positions[read_pos])
+        valid_labels.append(label)
+
+    if not valid_positions:
+        stats["window_no_bases"] += 1
+        return samples, stats
+
+    base_pos_arr = np.asarray(valid_positions)
+    label_arr = np.asarray(valid_labels, dtype=np.int16)
+
+    search_positions = base_pos_arr
+
+    for win_start in range(0, raw_signal.shape[0] - SIGNAL_LENGTH + 1, WINDOW_STRIDE):
+        win_end = win_start + SIGNAL_LENGTH
+        left = np.searchsorted(search_positions, win_start, side="left")
+        right = np.searchsorted(search_positions, win_end, side="left")
+
+        if left >= right:
+            stats["window_no_bases"] += 1
+            continue
+
+        label_seq = label_arr[left:right]
+        if label_seq.size > MAX_LABEL_LEN:
+            stats["window_label_too_long"] += 1
+            continue
+
+        signal_window = raw_signal[win_start:win_end]
+        try:
+            norm_signal = normalize_signal(signal_window)
+        except ValueError:
+            stats["mad_is_zero"] += 1
+            continue
+
+        padded_label = np.full((MAX_LABEL_LEN,), PAD_VAL, dtype=np.int16)
+        padded_label[: label_seq.size] = label_seq
+
+        samples.append(
+            Sample(
+                signal=norm_signal.reshape(1, SIGNAL_LENGTH).astype(np.float32),
+                label=padded_label,
+                label_len=int(label_seq.size),
+            )
+        )
+        stats["valid_samples"] += 1
+
+    return samples, stats
 
 
-def write_chunk_to_hdf5(datasets, chunk):
-    if not chunk:
-        return
-    event_ds, label_ds, label_len_ds = datasets
-    current_size = event_ds.shape[0]
-    new_size = current_size + len(chunk)
-    
-    event_ds.resize(new_size, axis=0)
-    label_ds.resize(new_size, axis=0)
-    label_len_ds.resize(new_size, axis=0)
-    
-    chunk_len = len(chunk)
-    signals = np.zeros((chunk_len, 1, SIGNAL_LENGTH), dtype=np.float32)
-    labels = np.zeros((chunk_len, MAX_LABEL_LEN), dtype=np.int32)
-    lengths = np.zeros((chunk_len,), dtype=np.int32)
+# --------------------------------------------------------------------------------------
+# POD5 lookup helper
+# --------------------------------------------------------------------------------------
 
-    for i, (sig, lab, length) in enumerate(chunk):
-        signals[i] = sig
-        labels[i] = lab
-        lengths[i] = length
-
-    event_ds[current_size:new_size] = signals
-    label_ds[current_size:new_size] = labels
-    label_len_ds[current_size:new_size] = lengths
-
-
-def consume_completed_futures(completed_futures, futures_set, total_stats, results_chunk, hdf5_datasets):
-    if not completed_futures:
-        return results_chunk
-
-    for future in completed_futures:
-        futures_set.remove(future)
-        samples_list, worker_stats = future.result()
-
-        for key, value in worker_stats.items():
-            total_stats[key] += value
-
-        if samples_list:
-            results_chunk.extend(samples_list)
-
-    if len(results_chunk) >= HDF5_WRITE_CHUNK_SIZE:
-        write_chunk_to_hdf5(hdf5_datasets, results_chunk)
-        return []
-
-    return results_chunk
-
-
-def main(args):
-    global global_pod5_lookup
-    
-    total_stats = {
-        "bam_reads_processed": 0, "id_not_in_pod5_index": 0, "read_not_found_in_pod5_file": 0,
-        "missing_tags": 0, "signal_too_short": 0, "total_windows_processed": 0,
-        "window_mad_is_zero": 0, "window_no_bases": 0, "window_label_invalid": 0,
-        "dbg_label_is_empty": 0,
-        "dbg_label_is_too_long": 0,
-        "valid_samples_created": 0, "tasks_submitted": 0
-    }
-    
-    start_time = time.time()
-
-    print("Step 1: Building detailed (path, batch, row) index from POD5 files...")
-    pod5_files = [os.path.join(args.pod5_dir, f) for f in os.listdir(args.pod5_dir) if f.endswith('.pod5')]
-    
-    global_pod5_lookup = {} 
-    
-    for pod5_path in tqdm(pod5_files, desc="Indexing POD5 files"):
+def build_pod5_lookup(pod5_dir: str) -> Dict[str, Tuple[str, int, int]]:
+    lookup: Dict[str, Tuple[str, int, int]] = {}
+    pod5_paths = [
+        os.path.join(pod5_dir, f)
+        for f in os.listdir(pod5_dir)
+        if f.endswith(".pod5")
+    ]
+    for pod5_path in tqdm(pod5_paths, desc="Indexing POD5"):
         with pod5.Reader(pod5_path) as reader:
             for batch_idx in range(reader.batch_count):
                 batch = reader.get_batch(batch_idx)
-                for row_idx in range(batch.num_reads): 
-                    read_record = batch.get_read(row_idx) 
-                    read_id_str = str(read_record.read_id) 
-                    global_pod5_lookup[read_id_str] = (pod5_path, batch_idx, row_idx)
-                    
-    print(f"Indexed {len(global_pod5_lookup)} unique reads from POD5 files.")
+                for row_idx in range(batch.num_reads):
+                    read = batch.get_read(row_idx)
+                    lookup[str(read.read_id)] = (pod5_path, batch_idx, row_idx)
+    return lookup
 
-    print("Step 2: Setting up HDF5 file and process pool...")
+
+# --------------------------------------------------------------------------------------
+# Chunk writer
+# --------------------------------------------------------------------------------------
+
+def flush_chunk(
+    chunk_id: int,
+    chunk: List[Sample],
+    output_dir: str,
+    manifest: List[Dict[str, str]],
+) -> int:
+    if not chunk:
+        return chunk_id
+
+    signals = np.stack([sample.signal for sample in chunk], axis=0)
+    labels = np.stack([sample.label for sample in chunk], axis=0)
+    lengths = np.asarray([sample.label_len for sample in chunk], dtype=np.int16)
+
+    signal_path = os.path.join(output_dir, f"signals_chunk_{chunk_id:05d}.npy")
+    label_path = os.path.join(output_dir, f"labels_chunk_{chunk_id:05d}.npy")
+    length_path = os.path.join(output_dir, f"lengths_chunk_{chunk_id:05d}.npy")
+
+    np.save(signal_path, signals)
+    np.save(label_path, labels)
+    np.save(length_path, lengths)
+
+    manifest.append(
+        {
+            "signals": os.path.basename(signal_path),
+            "labels": os.path.basename(label_path),
+            "lengths": os.path.basename(length_path),
+            "num_samples": int(signals.shape[0]),
+        }
+    )
+
+    return chunk_id + 1
+
+
+# --------------------------------------------------------------------------------------
+# Main driver
+# --------------------------------------------------------------------------------------
+
+def main(args: argparse.Namespace) -> None:
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    print("[1/5] Building POD5 index…")
+    lookup = build_pod5_lookup(args.pod5_dir)
+    print(f"Indexed {len(lookup)} reads from POD5 files.")
+
+    print("[2/5] Opening BAM file…")
     bam_file = pysam.AlignmentFile(args.bam_file, "rb")
-    
-    # --- [关键修改：高效获取 BAM 总数] ---
-    bam_file_size = 0
-    try:
-        # 使用 pysam.idxstats 直接解析索引文件 (等同于 samtools idxstats)
-        # 它返回一个字符串，格式为：ref_name \t seq_len \t mapped \t unmapped \n
-        idx_stats_str = pysam.idxstats(args.bam_file)
-        
-        if idx_stats_str:
-            for line in idx_stats_str.splitlines():
-                parts = line.split('\t')
-                if len(parts) >= 4:
-                    # 第3列是 mapped, 第4列是 unmapped
-                    mapped_count = int(parts[2])
-                    unmapped_count = int(parts[3])
-                    bam_file_size += (mapped_count + unmapped_count)
-            
-            print(f"Total reads estimated from BAM index (pysam.idxstats): {bam_file_size}")
-        else:
-            raise ValueError("pysam.idxstats returned empty result")
 
-    except Exception as e:
-        # 如果上面的方法依然失败，回退到读取文件头 (可能不准确)
-        print(f"Warning: Could not determine total reads via idxstats ({e}).")
-        if bam_file.mapped > 0:
-            bam_file_size = bam_file.mapped + bam_file.unmapped
-            print(f"Fallback: Total reads from BAM header/mapped prop: {bam_file_size}")
-        else:
-             print("Fallback: Progress bar will not show ETA (total unknown).")
-             bam_file_size = None
-
+    print("[3/5] Initializing workers…")
     max_workers = args.workers
-    MAX_QUEUE_SIZE = max_workers * 10
-    
-    print(f"Using {max_workers} worker processes.")
+    max_queue_size = max_workers * 8
 
-    with h5py.File(args.output_hdf5, 'w') as hf:
-        event_ds = hf.create_dataset('event', (0, 1, SIGNAL_LENGTH), maxshape=(None, 1, SIGNAL_LENGTH), dtype=np.float32)
-        label_ds = hf.create_dataset('label', (0, MAX_LABEL_LEN), maxshape=(None, MAX_LABEL_LEN), dtype=np.int32)
-        label_len_ds = hf.create_dataset('label_len', (0,), maxshape=(None,), dtype=np.int32)
-        
-        hdf5_datasets = (event_ds, label_ds, label_len_ds)
-        results_chunk = []
+    total_stats = {
+        "bam_reads": 0,
+        "tasks_submitted": 0,
+        "valid_samples": 0,
+    }
 
-        with ProcessPoolExecutor(
-            max_workers=max_workers,
-            initializer=worker_init,
-            initargs=(args.reference_fasta,)
-        ) as executor:
+    manifest: List[Dict[str, str]] = []
+    chunk_buffer: List[Sample] = []
+    chunk_id = 0
+    start_time = time.time()
 
-            futures = set()
-            print("Step 3 & 4: Submitting tasks and consuming results...")
-            
-            # --- [关键修改：tqdm 加入 total 参数] ---
-            # 因为你的消费者逻辑会阻塞生产者 (MAX_QUEUE_SIZE)，所以这个进度条的速率准确反映了整体处理速度
-            bam_iterator = tqdm(
-                bam_file, 
-                total=bam_file_size, 
-                desc="Processing Reads", 
-                unit="read",
-                dynamic_ncols=True, # 自动调整宽度
-                smoothing=0.05      # 降低抖动
+    with ProcessPoolExecutor(
+        max_workers=max_workers,
+        initializer=worker_init,
+        initargs=(args.reference_fasta, lookup),
+    ) as executor:
+        futures = set()
+        iterator = tqdm(bam_file, desc="Scanning BAM")
+
+        for read in iterator:
+            total_stats["bam_reads"] += 1
+
+            if read.is_unmapped or not read.has_tag("mv"):
+                continue
+            if read.query_name not in lookup:
+                continue
+
+            ts_tag = read.get_tag("ts") if read.has_tag("ts") else 0
+            mv_tag = read.get_tag("mv")
+
+            aligned_pairs = [
+                (rp, ref_pos)
+                for rp, ref_pos in read.get_aligned_pairs(matches_only=False)
+                if rp is not None and ref_pos is not None
+            ]
+            if not aligned_pairs:
+                continue
+
+            task = TaskData(
+                read_id=read.query_name,
+                read_length=read.query_length,
+                reference_name=read.reference_name,
+                is_reverse=read.is_reverse,
+                ts_tag=ts_tag,
+                mv_tag=mv_tag,
+                read_to_ref_pairs=aligned_pairs,
             )
-            
-            for read in bam_iterator:
-                total_stats["bam_reads_processed"] += 1
-                
-                try:
-                    if not read.has_tag('mv') or not read.has_tag('ts'):
-                        total_stats["missing_tags"] += 1
-                        continue
 
-                    task_data = (
-                        read.query_name,
-                        read.reference_name,
-                        read.reference_start,
-                        read.reference_end,
-                        read.get_tag('ts'),
-                        read.get_tag('mv')
-                    )
-                    
-                    futures.add(executor.submit(process_task, task_data))
-                    total_stats["tasks_submitted"] += 1
-                    
-                except Exception as e:
-                    continue
-                
-                # 消费者逻辑 (Consumer Logic)
-                # 当队列满时，主进程在此处等待，这使得 tqdm 的速度与 Workers 处理速度同步
-                while len(futures) >= MAX_QUEUE_SIZE:
-                    done_futures, _ = wait(futures, timeout=0, return_when=FIRST_COMPLETED)
-                    if not done_futures:
-                        # 如果没有立刻完成的，稍微阻塞一下等待至少一个完成
-                        done_futures, _ = wait(futures, return_when=FIRST_COMPLETED)
+            futures.add(executor.submit(process_task, task))
+            total_stats["tasks_submitted"] += 1
 
-                    results_chunk = consume_completed_futures(
-                        done_futures,
-                        futures,
-                        total_stats,
-                        results_chunk,
-                        hdf5_datasets,
-                    )
+            while len(futures) >= max_queue_size:
+                done, _ = wait(futures, return_when=FIRST_COMPLETED)
+                futures.difference_update(done)
+                for future in done:
+                    samples, stats = future.result()
+                    chunk_buffer.extend(samples)
+                    total_stats["valid_samples"] += stats["valid_samples"]
+                if len(chunk_buffer) >= CHUNK_SIZE:
+                    chunk_id = flush_chunk(chunk_id, chunk_buffer, args.output_dir, manifest)
+                    chunk_buffer = []
 
-                # 抢先消费 (Optional, 保持流转顺畅)
-                if futures:
-                    done_futures, _ = wait(futures, timeout=0, return_when=FIRST_COMPLETED)
-                    results_chunk = consume_completed_futures(
-                        done_futures,
-                        futures,
-                        total_stats,
-                        results_chunk,
-                        hdf5_datasets,
-                    )
+        print("[4/5] Waiting for remaining workers…")
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Finishing"):
+            samples, stats = future.result()
+            chunk_buffer.extend(samples)
+            total_stats["valid_samples"] += stats["valid_samples"]
+            if len(chunk_buffer) >= CHUNK_SIZE:
+                chunk_id = flush_chunk(chunk_id, chunk_buffer, args.output_dir, manifest)
+                chunk_buffer = []
 
-            # Step 5: 处理剩余任务
-            print("Step 5: Consuming remaining tasks...")
-            remaining_futures = list(futures)
-            futures.clear()
-            for future in tqdm(as_completed(remaining_futures), total=len(remaining_futures), desc="Finishing pending"):
-                samples_list, worker_stats = future.result()
-                for key, value in worker_stats.items():
-                    total_stats[key] += value
-                
-                if samples_list:
-                    results_chunk.extend(samples_list)
-                
-                if len(results_chunk) >= HDF5_WRITE_CHUNK_SIZE:
-                    write_chunk_to_hdf5(hdf5_datasets, results_chunk)
-                    results_chunk = [] 
+    if chunk_buffer:
+        chunk_id = flush_chunk(chunk_id, chunk_buffer, args.output_dir, manifest)
 
-            if results_chunk:
-                write_chunk_to_hdf5(hdf5_datasets, results_chunk)
+    manifest_path = os.path.join(args.output_dir, "manifest.json")
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "signal_length": SIGNAL_LENGTH,
+                "max_label_len": MAX_LABEL_LEN,
+                "chunk_size": CHUNK_SIZE,
+                "num_chunks": len(manifest),
+                "chunks": manifest,
+                "stats": total_stats,
+                "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            },
+            f,
+            indent=2,
+        )
 
     bam_file.close()
-    end_time = time.time()
-    print("\n--- PROCESSING FINISHED ---")
-    print(f"Total time taken: {end_time - start_time:.2f} seconds")
-    print(f"Final valid samples created: {total_stats['valid_samples_created']}")
-    print("\n--- DETAILED STATISTICS REPORT ---")
-    for key, value in total_stats.items():
-        print(f"{key:<30}: {value}")
+    elapsed = time.time() - start_time
+    print("[5/5] Done.")
+    print(f"Total valid samples: {total_stats['valid_samples']}")
+    print(f"Chunks written: {len(manifest)}")
+    print(f"Manifest saved to: {manifest_path}")
+    print(f"Elapsed time: {elapsed / 60:.2f} min")
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--bam_file", type=str, required=True)
-    parser.add_argument("--pod5_dir", type=str, required=True)
-    parser.add_argument("--reference_fasta", type=str, required=True)
-    parser.add_argument("--output_hdf5", type=str, required=True)
-    parser.add_argument("--workers", type=int, default=8)
+    parser = argparse.ArgumentParser(description="Generate NumPy dataset from Dorado BAM + POD5")
+    parser.add_argument("--bam_file", required=True, help="Sorted/Indexed BAM with Dorado mv/ts tags")
+    parser.add_argument("--pod5_dir", required=True, help="Directory with POD5 files")
+    parser.add_argument("--reference_fasta", required=True, help="Reference FASTA used for alignment")
+    parser.add_argument("--output_dir", required=True, help="Destination directory for NumPy chunks")
+    parser.add_argument("--workers", type=int, default=8, help="Number of worker processes")
     args = parser.parse_args()
-    
+
     main(args)
