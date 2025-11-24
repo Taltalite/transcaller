@@ -245,13 +245,8 @@ def main(args):
     # 🚀 手动计算正确的输出长度 (基于 1998)
     # L1_out = floor((1998 + 6 - 7)/2) + 1 = 999
     # L2_out = floor((999 + 2 - 3)/2) + 1 = 500
-    true_output_len = 500
+    true_output_len = 512
     
-    if args.input_len != 1998:
-         print("="*80)
-         print(f"警告: 您的 --input-len ({args.input_len}) 不是 1998。")
-         print(f"       Bonito 数据集是 1998。请确保您知道自己在做什么。")
-         print("="*80)
     
     if args.output_len != true_output_len:
         print("="*80)
@@ -269,6 +264,14 @@ def main(args):
     # 🚀 (Utils 1) - 加载到 RAM
     print("🚀 启动 [快速内存加载] 模式...")
     dataset_to_split = BonitoNpyDataset(args.data_dir, args.num_samples)
+
+    actual_input_len = dataset_to_split.events.shape[-1]
+    if args.input_len != actual_input_len:
+        print("="*80)
+        print(f"警告: 您的 --input-len ({args.input_len}) 与数据实际长度 ({actual_input_len}) 不一致。")
+        print(f"       将自动使用实际长度 {actual_input_len}。")
+        print("="*80)
+        args.input_len = actual_input_len
 
     # (Utils 2) - 划分训练集和验证集
     val_size = int(len(dataset_to_split) * args.val_split)
@@ -425,8 +428,8 @@ if __name__ == '__main__':
     # --- 🚀 模型架构参数 (必须与 Bonito 数据匹配) ---
     parser.add_argument('--input-len', type=int, default=1998,
                         help="输入信号序列长度 (!! 匹配 chunks.npy !! 默认: 1998)")
-    parser.add_argument('--output-len', type=int, default=500,
-                        help="模型输出序列长度 (!! 匹配 1998/4 a=500 !! 默认: 500)")
+    parser.add_argument('--output-len', type=int, default=512,
+                        help="模型输出序列长度 (!! 匹配 1998/4 a=500 !! 默认: 512)")
     parser.add_argument('--num-classes', type=int, default=5,
                         help="类别数 (A,C,G,T,blank) (默认: 5)")
     parser.add_argument('--blank-id', type=int, default=4,

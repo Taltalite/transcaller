@@ -94,7 +94,38 @@ bonito basecaller \
 # > done
 
 
-python create_dataset_mp.py --bam_file /data/biolab-nvme-pcie2/lijy/HG002/HG002_dorado_10.sorted.bam \
- --pod5_dir /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10/ \
- --reference_fasta /home/lijy/windows_ssd/HG002/hg38.fa \
- --output_hdf5 /data/biolab-nvme-pcie2/lijy/HG002/dataset/HG002_dorado_10.h5 --workers 8
+/home/lijy/workspace/dorado-1.2.0-linux-x64/bin/dorado basecaller hac \
+ --reference  /home/lijy/windows_ssd/HG002/ref/GCF_000001405.26_GRCh38_genomic.fna \
+ --emit-moves /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10/ > /data/biolab-nvme-pcie2/lijy/HG002/HG002_dorado_10.bam
+
+samtools sort -@ 8 -o /data/biolab-nvme-pcie2/lijy/HG002/HG002_dorado_10.sorted.bam /data/biolab-nvme-pcie2/lijy/HG002/HG002_dorado_10.bam
+samtools index /data/biolab-nvme-pcie2/lijy/HG002/HG002_dorado_10.sorted.bam
+samtools view -@ 8 -F 2820 -b -o /data/biolab-nvme-pcie2/lijy/HG002/HG002_dorado_10.primary.bam /data/biolab-nvme-pcie2/lijy/HG002/HG002_dorado_10.sorted.bam
+samtools index /data/biolab-nvme-pcie2/lijy/HG002/HG002_dorado_10.primary.bam
+
+# 设置临时目录环境变量
+export TMPDIR=/data/biolab-nvme-pcie2/lijy/tmp_cache
+# (可选) 设置 Arrow 相关的环境变量，强制它使用我们指定的目录
+export ARROW_IO_THREADS=8
+
+python create_dataset_mp.py \
+    --bam_file /data/biolab-nvme-pcie2/lijy/HG002/HG002_dorado_10.primary.bam \
+    --pod5_dir /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10/ \
+    --reference_fasta /home/lijy/windows_ssd/HG002/ref/GCF_000001405.26_GRCh38_genomic.fna \
+    --output_dir /data/biolab-nvme-pcie2/lijy/HG002/dataset/ \
+    --workers 8
+
+
+python compare_dataset.py \
+    --bonito_dir /data/biolab-nvme-pcie2/lijy/HG002/dataset/pod5_10/ \
+    --my_dir /data/biolab-nvme-pcie2/lijy/HG002/dataset/pod5_10_dorado/
+
+
+python savectc_from_dorado.py \
+        --bam /data/biolab-nvme-pcie2/lijy/HG002/HG002_dorado_10.primary.bam \
+        --pod5 /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10/ \
+        --reference /home/lijy/windows_ssd/HG002/ref/GCF_000001405.26_GRCh38_genomic.fna \
+        --output /data/biolab-nvme-pcie2/lijy/HG002/dataset_debug/ \
+        --chunksize 2048 \
+        --limit 20000 \
+        --workers 8

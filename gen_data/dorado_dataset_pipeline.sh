@@ -23,6 +23,12 @@ dorado basecaller "${DORADO_MODEL}" "${POD5_DIR}" \
 SORTED_BAM="./reads.dorado.sorted.bam"
 PRIMARY_BAM="./reads.dorado.primary.bam"
 
+# Flag 值,含义 (Description),为什么要剔除？
+# 4,Unmapped (未比对上),这条 Read 没有比对到参考基因组上，后续分析用不到。
+# 256,Secondary alignment (次要比对),这条 Read 可能比对到了基因组的多个位置，这是次优的位置（通常用于处理多重比对）。
+# 512,QC fail (质控不通过),测序仪或软件标记这条 Read 质量有问题。
+# 2048,Supplementary alignment (补充比对),这条 Read 的一部分比对到了这里，另一部分比对到了别处（常见于结构变异或嵌合体）。
+
 samtools sort -o "${SORTED_BAM}" "${DORADO_BAM}"
 samtools index "${SORTED_BAM}"
 samtools view -F 2820 -b -o "${PRIMARY_BAM}" "${SORTED_BAM}"

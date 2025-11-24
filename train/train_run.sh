@@ -48,15 +48,15 @@ python train_from_bonito.py \
 
 
 python train_from_bonito.py \
-    --data-dir /home/lijy/windows_ssd/HG002/dataset/HG002_5_bonito/ \
-    --checkpoint-dir ./checkpoints_medium_1M \
+    --data-dir /data/biolab-nvme-pcie2/lijy/HG002/dataset_debug/ \
+    --checkpoint-dir ./checkpoints_HG002_debug \
     --num-samples 150000 \
-    --lr 0.0001 \
+    --lr 0.0005 \
     --val-split 0.05 \
     --seed 42 \
     --num-workers 8 \
     --embed-dim 512 \
-    --depth 8 \
+    --depth 12 \
     --num-heads 8 \
     --batch-size 128
   
@@ -75,3 +75,47 @@ python train_from_bonito.py \
     --depth 12 \
     --num-heads 8 \
     --batch-size 128
+
+
+python train_from_dorado.py \
+    --data-dir /data/biolab-nvme-pcie2/lijy/HG002/dataset/pod5_10_dorado/ \
+    --checkpoint-dir ./checkpoints_pod5_10_dorado_50k \
+    --num-samples 300000 \
+    --epochs 30 \
+    --lr 0.0005 \
+    --val-split 0.05 \
+    --seed 11451 \
+    --num-workers 8 \
+    --embed-dim 512 \
+    --depth 12 \
+    --num-heads 8 \
+    --batch-size 128
+
+
+python train_from_dorado.py \
+    --data-dir /data/biolab-nvme-pcie2/lijy/HG002/dataset_debug/ \
+    --checkpoint-dir ./checkpoints_HG002_debug \
+    --num-samples 150000 \
+    --lr 0.0005 \
+    --val-split 0.05 \
+    --seed 42 \
+    --num-workers 8 \
+    --embed-dim 512 \
+    --depth 12 \
+    --num-heads 8 \
+    --batch-size 128
+
+
+python train_from_bonito.py \
+    --data-dir /data/biolab-nvme-pcie2/lijy/Smadd-seq_data/bonito_basecall/ \
+    --checkpoint-dir ./checkpoints_pod5_ang500 \
+    --epochs 30 \
+    --lr 0.0001 \
+    --val-split 0.05 \
+    --seed 11451 \
+    --num-workers 8 \
+    --embed-dim 512 \
+    --depth 12 \
+    --num-heads 8 \
+    --batch-size 128 \
+    --input-len 2048
