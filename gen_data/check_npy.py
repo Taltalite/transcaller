@@ -1,9 +1,12 @@
 import numpy as np
 
 # 替换 'your_file.npy' 为你的文件路径
-file_path = '/data/biolab-nvme-pcie2/lijy/HG002/dataset/pod5_10/reference_lengths.npy'
+# file_path = '/data/biolab-nvme-pcie2/lijy/Smadd-seq_data/bonito_basecall/ang_500_bonito_savectc/references.npy'
+file_path = '/data/biolab-nvme-pcie2/lijy/m6A/dataset/m6A_pod5_single_dorado_v8/references.npy'
 
 # 加载 .npy 文件
+
+print(file_path)
 try:
     data = np.load(file_path)
 

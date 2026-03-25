@@ -52,6 +52,19 @@ python ./create_dataset_mpv5.py --bam_file /home/lijy/windows_ssd/HG002/HG002_ba
  --reference_fasta /home/lijy/windows_ssd/HG002/hg38.fa \
  --output_hdf5 /home/lijy/windows_ssd/HG002/dataset/HG002_m5.h5 --workers 8
 
+
+
+# =========================== compare with bonito ====================================
+python create_dataset_mp.py \
+  --bam_file /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10_called/bonito/HG002_bonito_10.sorted.bam \
+  --pod5_dir /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10/ \
+  --reference_fasta /home/lijy/windows_ssd/HG002/hg38.fa \
+  --output_dir /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10_called/custom/ \
+  --chunk_len 4000 \
+  --max_chunks 100000 \
+  --workers 16
+
+# =============================================================================================
  
 bonito basecaller \
  dna_r10.4.1_e8.2_400bps_hac@v5.0.0 \
@@ -61,7 +74,7 @@ bonito basecaller \
  --chunksize 2000 \
  --alignment-threads 14 \
  /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10 \
- > /data/biolab-nvme-pcie2/lijy/HG002/HG002_bonito_10.bam
+ > /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10_called/HG002_bonito_10.bam
 
 # (bonito) lijy@biolab-amd5950x:~/windows_ssd/HG002/dataset$ bonito basecaller \
 #  dna_r10.4.1_e8.2_400bps_hac@v5.0.0 \
@@ -129,3 +142,140 @@ python savectc_from_dorado.py \
         --chunksize 2048 \
         --limit 20000 \
         --workers 8
+
+
+python create_dataset_mp.py \
+    --bam_file /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10_called/HG002_dorado_10.sorted.bam \
+    --pod5_dir /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10/ \
+    --reference_fasta /data/biolab-nvme-pcie2/lijy/HG002/hg38.fa \
+    --output_dir /data/biolab-nvme-pcie2/lijy/HG002/dataset/pod5_10_dorado/ \
+    --chunk_len 4000 \
+    --stride 2000 \
+    --max_chunks 200000 \
+    --workers 8
+
+
+python create_dataset_mpv2.py \
+    --bam_file /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10_called/HG002_dorado_10.sorted.bam \
+    --pod5_dir /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10/ \
+    --reference_fasta /data/biolab-nvme-pcie2/lijy/HG002/hg38.fa \
+    --output_dir /data/biolab-nvme-pcie2/lijy/HG002/dataset/pod5_10_dorado_robust_scaling/ \
+    --chunk_len 4000 \
+    --stride 2000 \
+    --max_chunks 200000 \
+    --workers 8
+
+# =============================== 2026.01.07 ================================
+
+bonito basecaller \
+ dna_r10.4.1_e8.2_400bps_sup@v5.2.0 \
+ --device cuda:0 \
+ --save-ctc \
+ --reference /home/lijy/windows_ssd/HG002/hg38.fa \
+ --alignment-threads 14 \
+ --max-reads 10000 \
+ /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10 \
+ > /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10_called/bonito_sup/HG002_bonito_sup_10.bam
+
+# > reading pod5
+# > outputting aligned bam
+# > loading model dna_r10.4.1_e8.2_400bps_sup@v5.2.0
+# /home/lijy/workspace/bonito-uv/bonito/util.py:298: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+#   state_dict = torch.load(model_file, map_location=device)
+# > loading reference
+# > Chunks rejected from training data:                                                               
+#  - low_accuracy0.99: 56647
+#  - no_mapping: 4610
+#  - low_coverage0.90: 1125
+#  - N_in_sequence: 4
+# > written ctc training data to /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10_called/bonito_sup
+#   - chunks.npy with shape (137848,12000)
+#   - references.npy with shape (137848,1763)
+#   - reference_lengths.npy shape (137848)
+# > completed reads: 203580
+# > duration: 0:16:30
+# > samples per second 2.5E+06
+# > done
+
+python create_dataset_mpv3.py \
+    --bam-file /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10_called/HG002_dorado_10.sorted.bam \
+    --pod5-dir /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10/ \
+    --reference-fasta /data/biolab-nvme-pcie2/lijy/HG002/hg38.fa \
+    --output-dir /data/biolab-nvme-pcie2/lijy/HG002/dataset/pod5_10_dorado_v3/ \
+    --chunk-len 4000 \
+    --stride 3500 \
+    --max-chunks 500000 \
+    --workers 8
+
+
+python create_dataset_mpv4.py \
+    --bam-file /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10_called/HG002_dorado_10.sorted.bam \
+    --pod5-dir /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10/ \
+    --reference-fasta /data/biolab-nvme-pcie2/lijy/HG002/hg38.fa \
+    --output-dir /data/biolab-nvme-pcie2/lijy/HG002/dataset/pod5_10_dorado_v4/ \
+    --chunk-len 12000 \
+    --overlap 600 \
+    --max-chunks 500000 \
+    --workers 8
+
+
+python create_dataset_mpv5.py \
+    --bam-file /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10_called/HG002_dorado_10.sorted.bam \
+    --pod5-dir /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10/ \
+    --reference-fasta /data/biolab-nvme-pcie2/lijy/HG002/hg38.fa \
+    --output-dir /data/biolab-nvme-pcie2/lijy/HG002/dataset/pod5_10_dorado_v5/ \
+    --max-chunks 500000 \
+    --workers 8 \
+    --chunk-len 12000 \
+    --overlap 600 \
+    --norm-strategy pa \
+    --pa-mean 93.69239463939118 \
+    --pa-std 23.506745239082388
+
+
+python create_dataset_mpv6.py \
+    --bam-file /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10_called/HG002_dorado_10.sorted.bam \
+    --pod5-dir /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10/ \
+    --reference-fasta /data/biolab-nvme-pcie2/lijy/HG002/hg38.fa \
+    --output-dir /data/biolab-nvme-pcie2/lijy/HG002/dataset/pod5_10_dorado_v6/ \
+    --max-chunks 500000 \
+    --workers 8 \
+    --chunk-len 12000 \
+    --overlap 600 \
+    --norm-strategy pa \
+    --pa-mean 93.69239463939118 \
+    --pa-std 23.506745239082388
+
+
+python create_dataset_mpv8.py \
+    --bam-file /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10_called/HG002_dorado_10.sorted.bam \
+    --pod5-dir /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10/ \
+    --reference-fasta /data/biolab-nvme-pcie2/lijy/HG002/hg38.fa \
+    --output-dir /data/biolab-nvme-pcie2/lijy/HG002/dataset/pod5_10_dorado_v8/ \
+    --max-chunks 500000 \
+    --workers 8 \
+    --chunk-len 12000 \
+    --overlap 600 \
+    --norm-strategy pa \
+    --pa-mean 93.69239463939118 \
+    --pa-std 23.506745239082388
+
+
+python compare_sig.py --custom_dir /data/biolab-nvme-pcie2/lijy/HG002/dataset/pod5_10_dorado_v6/  \
+ --bonito_dir /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10_called/bonito_sup/  --output ./compare_sig_bonito_doradov6.png
+
+
+python inspect_sig.py --custom_dir /data/biolab-nvme-pcie2/lijy/HG002/dataset/pod5_10_dorado_v6/  \
+ --bonito_dir /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10_called/bonito_sup/  --output ./inspect_sig_bonito_doradov6.png
+
+
+python check_alignment.py --custom_dir /data/biolab-nvme-pcie2/lijy/HG002/dataset/pod5_10_dorado_v8/ --device cuda:0 \
+ --model_path /home/lijy/workspace/bonito-uv/bonito/models/dna_r10.4.1_e8.2_400bps_sup@v5.2.0/
+
+
+python check_alignment.py --custom_dir /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10_called/bonito_sup/ --device cuda:0 \
+ --model_path /home/lijy/workspace/bonito-uv/bonito/models/dna_r10.4.1_e8.2_400bps_sup@v5.2.0/
+
+
+python check_alignment_v2.py --custom_dir /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10_called/bonito_sup/ --device cuda:0 \
+ --model_path /home/lijy/workspace/bonito-uv/bonito/models/dna_r10.4.1_e8.2_400bps_sup@v5.2.0/

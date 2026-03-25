@@ -1,0 +1,9 @@
+=== Alignment Comparison Summary ===
+
+Bonito Mapping Rate: 47.43%
+Dorado Mapping Rate: 51.77%
+
+     tool   identity                       empirical_q                pred_q     length               ins_rate  del_rate
+                mean     median        std        mean     median       mean        sum         mean      mean      mean
+0  Bonito  86.603787  91.772152  16.860781   10.859050  10.847137  15.923616  391793623  1051.896621  3.025851  8.078411
+1  Dorado  86.185548  91.926346  17.550813   10.892263  10.929298  22.639825  409533564   917.489944  3.129808  8.489491

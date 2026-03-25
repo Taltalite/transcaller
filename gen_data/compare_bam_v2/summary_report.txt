@@ -1,0 +1,18 @@
+=== Basecaller Comparison Report ===
+
+[Bonito]
+  Mapped Reads:   287949
+  Unmapped Reads: 412749
+  Mean Pred Q:    16.32
+  Mean Strict Q:  10.27
+  Mean Mismatch Q:17.19
+  Median Identity:91.42%
+
+[Dorado]
+  Mapped Reads:   292240
+  Unmapped Reads: 415890
+  Mean Pred Q:    22.71
+  Mean Strict Q:  10.28
+  Mean Mismatch Q:17.26
+  Median Identity:91.50%
+

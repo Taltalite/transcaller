@@ -1,0 +1,17 @@
+--- Bonito Statistics ---
+Total Reads: 796,473
+Total Bases: 465.13 Mb
+N50: 1286 bp
+Mean Read Length: 583.99 bp
+Mean Q-Score: 9.71
+Median Q-Score: 12.19
+
+
+--- Dorado Statistics ---
+Total Reads: 1,232,721
+Total Bases: 508.36 Mb
+N50: 1136 bp
+Mean Read Length: 412.39 bp
+Mean Q-Score: 16.97
+Median Q-Score: 20.47
+

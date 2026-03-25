@@ -1,0 +1,140 @@
+[model]
+type = "seqdistmodel"
+package = "bonito.transformer"
+
+[model.seqdist]
+state_len = 5
+alphabet = [ "N", "A", "C", "G", "T",]
+
+[model.encoder]
+type = "namedserial"
+
+[model.encoder.conv]
+type = "serial"
+[[model.encoder.conv.sublayers]]
+type = "convolution"
+insize = 1
+size = 64
+bias = true
+winlen = 5
+stride = 1
+padding = 2
+activation = "swish"
+norm = "batchnorm"
+
+[[model.encoder.conv.sublayers]]
+type = "convolution"
+insize = 64
+size = 64
+bias = true
+winlen = 5
+stride = 1
+padding = 2
+activation = "swish"
+norm = "batchnorm"
+
+[[model.encoder.conv.sublayers]]
+type = "convolution"
+insize = 64
+size = 128
+bias = true
+winlen = 9
+stride = 3
+padding = 4
+activation = "swish"
+norm = "batchnorm"
+
+[[model.encoder.conv.sublayers]]
+type = "convolution"
+insize = 128
+size = 128
+bias = true
+winlen = 9
+stride = 2
+padding = 4
+activation = "swish"
+norm = "batchnorm"
+
+[[model.encoder.conv.sublayers]]
+type = "convolution"
+insize = 128
+size = 512
+bias = true
+winlen = 5
+stride = 2
+padding = 2
+activation = "swish"
+norm = "batchnorm"
+
+[[model.encoder.conv.sublayers]]
+type = "permute"
+dims = [ 0, 2, 1,]
+
+[model.encoder.transformer_encoder]
+type = "stack"
+depth = 18
+
+[model.encoder.upsample]
+type = "linearupsample"
+d_model = 512
+scale_factor = 2
+
+[model.encoder.crf]
+type = "linearcrfencoder"
+insize = 512
+n_base = 4
+state_len = 5
+bias = false
+scale = 5.0
+blank_score = 2.0
+expand_blanks = true
+permute = [ 1, 0, 2,]
+
+[model.encoder.transformer_encoder.layer]
+type = "transformerencoderlayer"
+d_model = 512
+nhead = 8
+dim_feedforward = 2048
+deepnorm_alpha = 2.4494897
+deepnorm_beta = 0.2886751
+attn_window = [ 127, 128,]
+
+[scaling]
+strategy = "pa"
+
+[run_info]
+sample_type = "dna"
+sample_rate = 5000
+
+[standardisation]
+standardise = 1
+mean = 93.69239463939118
+stdev = 23.506745239082388
+
+[qscore]
+scale = 1.05
+bias = 1.3
+
+[basecaller]
+batchsize = 128
+chunksize = 12000
+overlap = 600
+
+
+# 选择带 warmup 的调度器
+[lr_scheduler]
+package = "bonito.schedule"
+symbol = "linear_warmup_const_inverse_sqrt_decay"
+warmup_steps = 4000          # 视数据量可调
+decay_start_epoch = 2        # 提前进入衰减避免过大步长
+decay_scale = 1.0
+linear_cooldown_n_epochs = 0 # 如需训练末期再线性降，可调为 >0
+
+# 优化器超参（不在此写 lr,沿用 --lr 命令行或默认 2e-3)
+[optim]
+package = "torch.optim"
+symbol = "AdamW"
+betas = [0.9, 0.98]
+eps = 1e-8
+weight_decay = 0.01
+
