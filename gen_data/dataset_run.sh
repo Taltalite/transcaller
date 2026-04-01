@@ -279,3 +279,47 @@ python check_alignment.py --custom_dir /data/biolab-nvme-pcie2/lijy/HG002/pod5_p
 
 python check_alignment_v2.py --custom_dir /data/biolab-nvme-pcie2/lijy/HG002/pod5_pass_10_called/bonito_sup/ --device cuda:0 \
  --model_path /home/lijy/workspace/bonito-uv/bonito/models/dna_r10.4.1_e8.2_400bps_sup@v5.2.0/
+
+
+# =============================== 2026.03 m6A================================
+
+python create_dataset_mpv8.py \
+    --bam-file /data/biolab-nvme-pcie2/lijy/m6A/dorado_rna004_sup/mod/PAW43156_92158b33_73a20312_4.sorted.bam \
+    --pod5-dir /data/biolab-nvme-pcie2/lijy/m6A/dorado_rna004_sup/mod/src_data/ \
+    --reference-fasta /data/biolab-nvme-pcie2/lijy/HG002/hg38.fa \
+    --output-dir /data/biolab-nvme-pcie2/lijy/HG002/dataset/pod5_10_dorado_v8/ \
+    --sample-type rna \
+    --max-chunks 500000 \
+    --workers 8 \
+    --chunk-len 12000 \
+    --overlap 600 \
+    --norm-strategy pa \
+    --pa-mean 79.17339964465278 \
+    --pa-std 16.929280371741893
+
+
+
+# multihead dataset preperation for m6A detection
+
+/home/lijy/workspace/dorado-1.2.0-linux-x64/bin/dorado basecaller /data/biolab-nvme-pool1/fanqy/sequencing/bin/dorado_models/rna004_130bps_sup@v5.2.0 \
+ --reference  /data/biolab-nvme-pcie2/lijy/HG002/hg38.fa \
+ --estimate-poly-a \
+ --emit-moves \
+ /data/biolab-nvme-pcie2/lijy/m6A/dorado_rna004_sup/mix/canonical_pod5/ > /data/biolab-nvme-pcie2/lijy/m6A/dorado_rna004_sup/mix/canonical_bam/PAW51322_0f2f3583_34a338cb_0+10.bam
+
+samtools sort -@ 8 /data/biolab-nvme-pcie2/lijy/m6A/dorado_rna004_sup/mix/canonical_bam/PAW51322_0f2f3583_34a338cb_0+10.bam -o /data/biolab-nvme-pcie2/lijy/m6A/dorado_rna004_sup/mix/canonical_bam/PAW51322_0f2f3583_34a338cb_0+10.sorted.bam
+
+samtools index /data/biolab-nvme-pcie2/lijy/m6A/dorado_rna004_sup/mix/canonical_bam/PAW51322_0f2f3583_34a338cb_0+10.sorted.bam
+
+
+/home/lijy/workspace/dorado-1.2.0-linux-x64/bin/dorado basecaller /data/biolab-nvme-pool1/fanqy/sequencing/bin/dorado_models/rna004_130bps_sup@v5.2.0 \
+ --reference  /data/biolab-nvme-pcie2/lijy/HG002/hg38.fa \
+ --estimate-poly-a \
+ --emit-moves \
+ --device cuda:0 \
+ --batchsize 220 \
+ /data/biolab-nvme-pcie2/lijy/m6A/dorado_rna004_sup/mix/mod_pod5/ > /data/biolab-nvme-pcie2/lijy/m6A/dorado_rna004_sup/mix/mod_bam/PAW43156_92158b33_73a20312_0+10.bam
+
+samtools sort -@ 8 /data/biolab-nvme-pcie2/lijy/m6A/dorado_rna004_sup/mix/mod_bam/PAW43156_92158b33_73a20312_0+10.bam -o /data/biolab-nvme-pcie2/lijy/m6A/dorado_rna004_sup/mix/mod_bam/PAW43156_92158b33_73a20312_0+10.sorted.bam
+
+samtools index /data/biolab-nvme-pcie2/lijy/m6A/dorado_rna004_sup/mix/mod_bam/PAW43156_92158b33_73a20312_0+10.sorted.bam

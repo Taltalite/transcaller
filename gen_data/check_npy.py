@@ -2,7 +2,7 @@ import numpy as np
 
 # 替换 'your_file.npy' 为你的文件路径
 # file_path = '/data/biolab-nvme-pcie2/lijy/Smadd-seq_data/bonito_basecall/ang_500_bonito_savectc/references.npy'
-file_path = '/data/biolab-nvme-pcie2/lijy/m6A/dataset/m6A_pod5_single_dorado_v8/references.npy'
+file_path = '/data/biolab-nvme-pcie2/lijy/m6A/dorado_rna004_sup/mod/dataset/references.npy'
 
 # 加载 .npy 文件
 
